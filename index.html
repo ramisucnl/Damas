@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Damas Pro - Inteligencia Artificial</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .board-bg { background-color: #451a03; background-image: url("https://www.transparenttextures.com/patterns/wood-pattern.png"); }
+        .cell-dark { background-color: #262626; }
+        .cell-light { background-color: #e5e5e5; }
+        .king-icon { font-size: 1.5rem; filter: drop-shadow(0 2px 2px rgba(0,0,0,0.5)); }
+        @keyframes crown-glow { 0%, 100% { filter: brightness(1) drop-shadow(0 0 5px gold); } 50% { filter: brightness(1.3) drop-shadow(0 0 15px gold); } }
+        .is-king { animation: crown-glow 2s infinite; }
+        .piece { transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+        .must-capture { box-shadow: 0 0 0 4px #4ade80; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }
+    </style>
+</head>
+<body class="bg-stone-100 min-h-screen flex items-center justify-center font-sans select-none">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useCallback } = React;
+
+        const playSfx = (type) => {
+            const sounds = {
+                move: 'https://assets.mixkit.co/active_storage/sfx/2571/2571-preview.m4a',
+                capture: 'https://assets.mixkit.co/active_storage/sfx/1435/1435-preview.m4a'
+            };
+            const audio = new Audio(sounds[type]);
+            audio.volume = 0.4;
+            audio.play().catch(() => {});
+        };
+
+        const Checkers = () => {
+            const [board, setBoard] = useState([]);
+            const [turn, setTurn] = useState('red');
+            const [selected, setSelected] = useState(null);
+            const [moves, setMoves] = useState([]);
+            const [jumpingPiece, setJumpingPiece] = useState(null);
+            const [winner, setWinner] = useState(null);
+            const [difficulty, setDifficulty] = useState('hard'); // default hard
+
+            const init = useCallback(() => {
+                const b = Array(8).fill(null).map(() => Array(8).fill(null));
+                for (let r = 0; r < 8; r++) {
+                    for (let c = 0; c < 8; c++) {
+                        if ((r + c) % 2 !== 0) {
+                            if (r < 3) b[r][c] = { color: 'blue', king: false };
+                            if (r > 4) b[r][c] = { color: 'red', king: false };
+                        }
+                    }
+                }
+                setBoard(b);
+                setTurn('red');
+                setSelected(null);
+                setMoves([]);
+                setJumpingPiece(null);
+                setWinner(null);
+            }, []);
+
+            useEffect(() => { init(); }, [init]);
+
+            // Motor de reglas (Misma lógica de Reinas Voladoras)
+            const getMoves = (r, c, b, onlyJumps = false) => {
+                const p = b[r][c];
+                if (!p) return [];
+                const list = [];
+                const dirs = [[1,1], [1,-1], [-1,1], [-1,-1]];
+
+                dirs.forEach(([dr, dc]) => {
+                    const isForward = (p.color === 'red' && dr < 0) || (p.color === 'blue' && dr > 0);
+                    if (p.king) {
+                        let foundEnemy = false;
+                        for (let dist = 1; dist < 8; dist++) {
+                            const nr = r + dr * dist; const nc = c + dc * dist;
+                            if (nr < 0 || nr >= 8 || nc < 0 || nc >= 8) break;
+                            const target = b[nr][nc];
+                            if (!foundEnemy) {
+                                if (!target) { if (!onlyJumps) list.push({ r: nr, c: nc, isJump: false }); }
+                                else if (target.color !== p.color) { foundEnemy = { r: nr, c: nc }; }
+                                else break;
+                            } else {
+                                if (!target) { list.push({ r: nr, c: nc, capR: foundEnemy.r, capC: foundEnemy.c, isJump: true }); }
+                                else break;
+                            }
+                        }
+                    } else {
+                        const nr = r + dr, nc = c + dc;
+                        const jr = r + dr * 2, jc = c + dc * 2;
+                        if (isForward && jr >= 0 && jr < 8 && jc >= 0 && jc < 8) {
+                            const mid = b[nr][nc];
+                            if (mid && mid.color !== p.color && !b[jr][jc]) 
+                                list.push({ r: jr, c: jc, capR: nr, capC: nc, isJump: true });
+                        }
+                        if (!onlyJumps && isForward && nr >= 0 && nr < 8 && nc >= 0 && nc < 8 && !b[nr][nc]) 
+                            list.push({ r: nr, c: nc, isJump: false });
+                    }
+                });
+                return list;
+            };
+
+            const getAllLegalMoves = (player, b) => {
+                let all = []; let hasJump = false;
+                for (let r = 0; r < 8; r++) {
+                    for (let c = 0; c < 8; c++) {
+                        if (b[r][c]?.color === player) {
+                            const m = getMoves(r, c, b);
+                            if (m.some(x => x.isJump)) hasJump = true;
+                            all.push(...m.map(x => ({ fromR: r, fromC: c, ...x })));
+                        }
+                    }
+                }
+                return hasJump ? all.filter(x => x.isJump) : all;
+            };
+
+            // IA: SISTEMA DE EVALUACIÓN
+            const evaluateBoard = (b) => {
+                let score = 0;
+                for (let r = 0; r < 8; r++) {
+                    for (let c = 0; c < 8; c++) {
+                        const p = b[r][c];
+                        if (!p) continue;
+                        const val = p.king ? 10 : (5 + (p.color === 'blue' ? r : 7-r) * 0.1);
+                        score += (p.color === 'blue' ? val : -val);
+                    }
+                }
+                return score;
+            };
+
+            const moveIA = () => {
+                const moves = getAllLegalMoves('blue', board);
+                if (moves.length === 0) return;
+
+                let bestMove = moves[0];
+
+                if (difficulty === 'easy') {
+                    bestMove = moves[Math.floor(Math.random() * moves.length)];
+                } else {
+                    // Simular movimientos para dificultad media/difícil
+                    let maxScore = -Infinity;
+                    moves.forEach(m => {
+                        // Simulación simple de un paso adelante
+                        const tempBoard = board.map(row => row.map(cell => cell ? {...cell} : null));
+                        tempBoard[m.r][m.c] = tempBoard[m.fromR][m.fromC];
+                        tempBoard[m.fromR][m.fromC] = null;
+                        if (m.isJump) tempBoard[m.capR][m.capC] = null;
+                        
+                        let currentEval = evaluateBoard(tempBoard);
+                        // Bonos por capturas en modo difícil
+                        if (difficulty === 'hard' && m.isJump) currentEval += 2;
+                        
+                        if (currentEval > maxScore) {
+                            maxScore = currentEval;
+                            bestMove = m;
+                        }
+                    });
+                }
+                movePiece(bestMove.fromR, bestMove.fromC, bestMove);
+            };
+
+            const movePiece = (fromR, fromC, m) => {
+                const nextBoard = board.map(row => row.map(cell => cell ? { ...cell } : null));
+                const p = { ...nextBoard[fromR][fromC] };
+                nextBoard[m.r][m.c] = p;
+                nextBoard[fromR][fromC] = null;
+                if (m.isJump) nextBoard[m.capR][m.capC] = null;
+
+                let crowned = false;
+                if (!p.king && ((p.color === 'red' && m.r === 0) || (p.color === 'blue' && m.r === 7))) {
+                    p.king = true; crowned = true; playSfx('capture');
+                } else { playSfx(m.isJump ? 'capture' : 'move'); }
+
+                let canJumpAgain = false;
+                if (m.isJump && !crowned) {
+                    const extra = getMoves(m.r, m.c, nextBoard, true);
+                    if (extra.length > 0) {
+                        canJumpAgain = true;
+                        setJumpingPiece({ r: m.r, c: m.c });
+                        setMoves(extra);
+                        setSelected({ r: m.r, c: m.c });
+                    }
+                }
+
+                setBoard(nextBoard);
+                if (!canJumpAgain) {
+                    setJumpingPiece(null); setSelected(null); setMoves([]);
+                    const nextPlayer = p.color === 'red' ? 'blue' : 'red';
+                    setTurn(nextPlayer);
+                    if (getAllLegalMoves(nextPlayer, nextBoard).length === 0) setWinner(p.color);
+                }
+            };
+
+            const handleClick = (r, c) => {
+                if (turn !== 'red' || winner) return;
+                if (jumpingPiece) {
+                    const m = moves.find(x => x.r === r && x.c === c);
+                    if (m) movePiece(jumpingPiece.r, jumpingPiece.c, m);
+                    return;
+                }
+                const p = board[r][c];
+                if (p?.color === 'red') {
+                    const allLegal = getAllLegalMoves('red', board);
+                    const pieceMoves = getMoves(r, c, board);
+                    const jumpAvail = allLegal.some(x => x.isJump);
+                    if (jumpAvail && !pieceMoves.some(x => x.isJump)) return;
+                    setSelected({ r, c });
+                    setMoves(jumpAvail ? pieceMoves.filter(x => x.isJump) : pieceMoves);
+                } else if (selected) {
+                    const m = moves.find(x => x.r === r && x.c === c);
+                    if (m) movePiece(selected.r, selected.c, m);
+                }
+            };
+
+            useEffect(() => {
+                if (turn === 'blue' && !winner) {
+                    const timer = setTimeout(moveIA, 800);
+                    return () => clearTimeout(timer);
+                }
+            }, [turn, winner]);
+
+            return (
+                <div className="flex flex-col items-center gap-6 p-4">
+                    {/* Panel de Control */}
+                    <div className="bg-white p-6 rounded-3xl shadow-2xl text-center border-b-4 border-stone-300 w-full max-w-md">
+                        <h1 className="text-3xl font-black text-stone-800 tracking-tighter italic">DAMAS AI</h1>
+                        
+                        <div className="flex justify-center gap-2 mt-4">
+                            {['easy', 'medium', 'hard'].map(lvl => (
+                                <button key={lvl} onClick={() => setDifficulty(lvl)}
+                                    className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter transition-all
+                                    ${difficulty === lvl ? 'bg-stone-800 text-white scale-110 shadow-md' : 'bg-stone-100 text-stone-400 hover:bg-stone-200'}`}>
+                                    {lvl === 'easy' ? 'Aprendiz' : lvl === 'medium' ? 'Estratega' : 'Maestro'}
+                                </button>
+                            ))}
+                        </div>
+
+                        <div className="flex gap-4 mt-6 justify-center">
+                            <div className={`px-4 py-1 rounded-full text-xs font-black transition-all ${turn === 'red' ? 'bg-red-500 text-white shadow-lg scale-105' : 'bg-stone-100 text-stone-400'}`}>TÚ</div>
+                            <div className={`px-4 py-1 rounded-full text-xs font-black transition-all ${turn === 'blue' ? 'bg-blue-600 text-white shadow-lg scale-105' : 'bg-stone-100 text-stone-400'}`}>CPU</div>
+                        </div>
+                    </div>
+
+                    <div className="board-bg p-3 rounded-2xl shadow-2xl ring-8 ring-amber-950">
+                        <div className="grid grid-cols-8 border-4 border-amber-950">
+                            {board.map((row, r) => row.map((cell, c) => {
+                                const isSelected = selected?.r === r && selected?.c === c;
+                                const isMove = moves.some(m => m.r === r && m.c === c);
+                                const canJump = turn === 'red' && !jumpingPiece && cell?.color === 'red' && 
+                                               getAllLegalMoves('red', board).some(m => m.fromR === r && m.fromC === c && m.isJump);
+
+                                return (
+                                    <div key={`${r}-${c}`} onClick={() => handleClick(r, c)}
+                                        className={`w-11 h-11 sm:w-16 sm:h-16 flex items-center justify-center relative
+                                            ${(r + c) % 2 === 0 ? 'cell-light' : 'cell-dark'}`}>
+                                        {isMove && <div className="absolute w-5 h-5 bg-green-400/60 rounded-full z-10 animate-ping"></div>}
+                                        {isSelected && <div className="absolute inset-0 bg-yellow-400/20 z-0"></div>}
+                                        {cell && (
+                                            <div className={`piece w-9 h-9 sm:w-13 sm:h-13 rounded-full shadow-xl z-20 flex items-center justify-center border-b-4
+                                                ${cell.color === 'red' ? 'bg-gradient-to-tr from-red-700 to-red-500 border-red-800' 
+                                                : 'bg-gradient-to-tr from-blue-800 to-blue-500 border-blue-900 ring-2 ring-white'}
+                                                ${cell.king ? 'is-king' : ''} ${canJump ? 'must-capture' : ''}`}>
+                                                {cell.king && <span className="king-icon">👑</span>}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            }))}
+                        </div>
+                    </div>
+
+                    <button onClick={init} className="text-stone-400 font-bold hover:text-stone-600 transition-colors uppercase text-[10px] tracking-widest">Reiniciar Partida</button>
+
+                    {winner && (
+                        <div className="fixed inset-0 bg-stone-900/80 backdrop-blur-md flex items-center justify-center z-50 p-6">
+                            <div className="bg-white p-10 rounded-[3rem] text-center shadow-2xl border-t-8 border-blue-500">
+                                <h2 className="text-4xl font-black text-stone-800 mb-4 uppercase">{winner === 'red' ? 'Has vencido a la IA' : 'La IA te ha superado'}</h2>
+                                <button onClick={init} className="bg-blue-600 text-white px-10 py-4 rounded-2xl font-black hover:bg-blue-700 transition-all shadow-xl">VOLVER A INTENTAR</button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<Checkers />);
+    </script>
+</body>
+</html>

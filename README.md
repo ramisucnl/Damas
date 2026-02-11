@@ -1,4 +1,4 @@
-# 🔴 Damas AI Elite - Pro Edition 🔵
+# 🔴 Damas AI UCNL - Pro Edition 🔵
 
 ¡Bienvenido a **Damas AI UCNL**, una versión moderna, fluida y potente del clásico juego de damas! Este proyecto está construido enteramente con **React.js** y **Tailwind CSS**, ofreciendo una experiencia de usuario enriquecida con sonidos, animaciones y una Inteligencia Artificial con tres niveles de dificultad.
 
